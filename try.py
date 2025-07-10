@@ -1,6 +1,20 @@
-import asyncio, time, random, json
+import asyncio
+import time
+import random
+import json
 from functools import partial
-import httpx
+
+try:
+    import httpx
+    HTTPStatusError = httpx.HTTPStatusError
+except Exception:  # pragma: no cover - httpx may not be installed
+    httpx = None
+    class HTTPStatusError(Exception):
+        """Fallback error used when httpx isn't available."""
+        def __init__(self, response=None):
+            super().__init__("HTTP error")
+            self.response = response
+
 from solders.pubkey import Pubkey
 from solana.rpc.async_api import AsyncClient
 from solana.keypair import Keypair
@@ -35,19 +49,26 @@ def throttle():
         last_reset, req_count = now, 0
     req_count += 1
     if req_count > RATE_LIMIT:
-        time.sleep(1 - (now - last_reset))
+        sleep_for = max(0.0, 1 - (now - last_reset))
+        time.sleep(sleep_for)
 
 async def rpc_with_retry(func, *args, max_retries=5):
     for attempt in range(1, max_retries + 1):
         try:
             return await func(*args)
-        except httpx.HTTPStatusError as e:
-            if e.response.status_code == 429:
+        except HTTPStatusError as e:
+            if getattr(e.response, "status_code", None) == 429:
                 delay = float(e.response.headers.get("Retry-After", 2 ** attempt))
                 print(f"[429] Rate limited – retry {attempt}, sleeping {delay:.1f}s")
                 await asyncio.sleep(delay)
             else:
                 raise
+        except Exception as e:
+            if attempt == max_retries:
+                raise
+            delay = 2 ** attempt
+            print(f"[!] RPC error on attempt {attempt}: {e} – retrying in {delay}s")
+            await asyncio.sleep(delay)
     raise Exception(f"RPC {func.__name__} failed after {max_retries} retries")
 
 def get_client():
